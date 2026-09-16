@@ -210,6 +210,66 @@ def _wav_bytes(path: Path) -> bytes:
         return fh.read()
 
 
+# ── STT 输入校验：区分调用方错误(400) 与 服务端异常(500) ────────────────
+_FFMPEG_DECODE_HINT = "Invalid data found when processing input"
+
+
+def _av():
+    """惰性取 PyAV（faster-whisper 的依赖）；缺失时返回 None 以跳过预校验。"""
+    try:
+        import av  # noqa: PLC0415
+
+        return av
+    except Exception:
+        return None
+
+
+def _is_input_error(exc: Exception) -> bool:
+    """判断异常是否属于“调用方输入/解码”问题（→ 400），而非服务端故障。"""
+    av = _av()
+    if av is not None and hasattr(av, "error"):
+        base = getattr(av.error, "FFmpegError", None)
+        if base is not None and isinstance(exc, base):
+            return True
+    return _FFMPEG_DECODE_HINT in str(exc)
+
+
+def _validate_audio_input(path: Path) -> None:
+    """轻量可解码性预校验：空文件/非音频/损坏/无音频流 → 清晰 400；
+    校验通过返回 None，正常请求不额外影响。"""
+    if path.stat().st_size == 0:
+        raise HTTPException(400, "转写失败: 文件为空")
+
+    av = _av()
+    if av is None:  # 环境无 av 则不预校验，交给外层异常分级兜底
+        return
+
+    try:
+        container = av.open(str(path))
+    except Exception as exc:
+        raise HTTPException(400, "转写失败: 无法解码的音频文件（格式不支持或文件损坏）") from exc
+    try:
+        stream = next((s for s in container.streams if s.type == "audio"), None)
+        if stream is None:
+            raise HTTPException(400, "转写失败: 文件中未找到音频流")
+        n = 0
+        for _frame in container.decode(stream):
+            n += 1
+            if n >= 8:  # 只解码少量帧验证可解码性，避免对长音频重复全量解码
+                break
+        if n == 0:
+            raise HTTPException(400, "转写失败: 音频内容无法解码")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(400, f"转写失败: 音频解码失败（{exc}）") from exc
+    finally:
+        try:
+            container.close()
+        except Exception:
+            pass
+
+
 # ── OpenAI 风格：语音合成 ───────────────────────────────────────────────
 @app.post("/v1/audio/speech")
 async def audio_speech(payload: dict):
@@ -271,8 +331,22 @@ async def audio_transcriptions(
         with open(tmp, "wb") as fh:
             while chunk := await file.read(1 << 20):
                 fh.write(chunk)
+        _validate_audio_input(tmp)
         text, detail, elapsed = STT.transcribe(str(tmp), language=language, beam_size=beam_size)
+    except HTTPException as exc:
+        # 调用方输入错误（400）：保持原样不转 500，但要留一条 warning 供排查。
+        log.warning(
+            "STT 输入错误(400): 调用方传入无法解码/空/非音频文件 filename=%r detail=%s",
+            file.filename, exc.detail,
+        )
+        raise
     except Exception as exc:
+        if _is_input_error(exc):
+            log.warning(
+                "STT 输入错误(400): 调用方传入无法解码/空文件 filename=%r error=%s",
+                file.filename, exc,
+            )
+            raise HTTPException(400, f"转写失败: {exc}") from exc
         log.exception("STT 转写失败")
         raise HTTPException(500, f"转写失败: {exc}") from exc
     finally:
