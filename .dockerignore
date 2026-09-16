@@ -1,0 +1,41 @@
+# ── git 无关 / 体积 ──
+.git
+.gitignore
+*.md
+docs/
+scripts/
+README.md
+
+# ── 容器构建时不需要的本地环境 ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ── 运行时产物 ──
+generated_audio/
+*.wav
+*.mp3
+*.opus
+out.*
+*.log
+
+# ── 编辑器 / 系统 ──
+.vscode/
+.idea/
+.DS_Store
+*.bak
+*~
+*.swp
+
+# 模型权重（宿主挂载，不进镜像）
+models/
+*.onnx
+*.bin
+*.gguf
+
+# Docker/Temp
+Dockerfile
+.dockerignore
+.dockerignore.keep/

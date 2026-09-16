@@ -26,3 +26,6 @@ models/
 *.onnx
 *.bin
 *.gguf
+
+# ── 构建期 vendored 的 torch CPU wheel（deploy.sh 自动下载） ──
+runtime/wheels/
