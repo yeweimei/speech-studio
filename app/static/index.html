@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>speech-studio · 语音服务调试台</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b21; --fg:#e6e8ec; --muted:#8b93a1; --accent:#4c8dff; --ok:#3ecf8e; --err:#ff6b6b; --border:#262b33; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.6 -apple-system,"Segoe UI",system-ui,"Noto Sans CJK SC",sans-serif; }
+  .wrap { max-width:900px; margin:0 auto; padding:32px 20px 64px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin-bottom:24px; font-size:13px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:20px; margin-bottom:18px; }
+  .card h2 { font-size:15px; margin:0 0 14px; display:flex; align-items:center; gap:8px; }
+  .tag { font-size:11px; padding:2px 8px; border-radius:999px; background:#232833; color:var(--muted); font-weight:500; }
+  textarea, input[type=text], select { width:100%; background:#10131a; color:var(--fg); border:1px solid var(--border); border-radius:8px; padding:10px 12px; font:inherit; }
+  textarea { min-height:88px; resize:vertical; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; margin-top:12px; }
+  .row > * { flex:1 1 auto; }
+  label { display:block; font-size:12px; color:var(--muted); margin-bottom:5px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:10px 20px; font:inherit; font-weight:600; cursor:pointer; white-space:nowrap; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button.ghost { background:#232833; color:var(--fg); font-weight:500; }
+  audio { width:100%; margin-top:14px; }
+  pre, .out { background:#10131a; border:1px solid var(--border); border-radius:8px; padding:12px; margin-top:14px; white-space:pre-wrap; word-break:break-word; min-height:20px; font-size:13px; }
+  .meta { color:var(--muted); font-size:12px; margin-top:10px; }
+  .dot { width:8px; height:8px; border-radius:50%; display:inline-block; background:var(--err); }
+  .dot.ok { background:var(--ok); }
+  code { background:#232833; padding:1px 6px; border-radius:4px; font-size:12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>speech-studio</h1>
+  <div class="sub">本地音频模型服务 · TTS 跑 Iris Xe 核显 · STT 跑 CPU<span id="healthLine"></span></div>
+
+  <div class="card">
+    <h2>TTS 语音合成 <span class="tag">POST /v1/audio/speech</span></h2>
+    <textarea id="ttsText" placeholder="输入要合成的文本…">今天下午三点开会，记得带上那份文件。</textarea>
+    <div class="row">
+      <div style="flex:0 0 190px"><label>音色</label><select id="ttsVoice"></select></div>
+      <div style="flex:0 0 140px"><label>采样模式</label>
+        <select id="ttsMode"><option value="fixed">fixed（快）</option><option value="full">full（高质量）</option></select>
+      </div>
+      <div style="flex:0 0 auto"><button id="ttsGo">合成</button></div>
+    </div>
+    <audio id="ttsAudio" controls style="display:none"></audio>
+    <div class="meta" id="ttsMeta"></div>
+  </div>
+
+  <div class="card">
+    <h2>STT 语音转写 <span class="tag">POST /v1/audio/transcriptions</span></h2>
+    <div class="row">
+      <div><label>音频文件（wav/mp3/opus/m4a/flac）</label><input type="file" id="sttFile" accept="audio/*"></div>
+      <div style="flex:0 0 130px"><label>语言</label>
+        <select id="sttLang"><option value="zh">中文</option><option value="en">英文</option><option value="auto">自动</option></select>
+      </div>
+      <div style="flex:0 0 auto"><button id="sttGo">转写</button></div>
+    </div>
+    <div class="out" id="sttOut">等待上传…</div>
+    <div class="meta" id="sttMeta"></div>
+  </div>
+
+  <div class="card">
+    <h2>服务状态 <span class="tag">GET /health</span></h2>
+    <pre id="healthOut">加载中…</pre>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+async function loadHealth() {
+  try {
+    const r = await fetch('/health');
+    const h = await r.json();
+    $('healthOut').textContent = JSON.stringify(h, null, 2);
+    const ok = h.status === 'ok';
+    $('healthLine').innerHTML = ` · <span class="dot ${ok ? 'ok' : ''}"></span> ${h.status}`;
+    const voices = (h.tts && h.tts.voices) || [];
+    if (voices.length && !$('ttsVoice').options.length) {
+      $('ttsVoice').innerHTML = voices.map(v => `<option value="${v}">${v}</option>`).join('');
+    }
+  } catch (e) {
+    $('healthOut').textContent = '无法访问 /health: ' + e;
+  }
+}
+
+$('ttsGo').onclick = async () => {
+  const text = $('ttsText').value.trim();
+  if (!text) return;
+  $('ttsGo').disabled = true; $('ttsMeta').textContent = '合成中…';
+  const t0 = performance.now();
+  try {
+    const r = await fetch('/v1/audio/speech', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'moss-tts-nano', input: text, voice: $('ttsVoice').value, response_format: 'wav', sample_mode: $('ttsMode').value })
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const blob = await r.blob();
+    const a = $('ttsAudio');
+    a.src = URL.createObjectURL(blob);
+    a.style.display = 'block';
+    await a.play().catch(() => {});
+    const wall = ((performance.now() - t0) / 1000).toFixed(2);
+    const gen = r.headers.get('X-Gen-Seconds');
+    $('ttsMeta').textContent = `端到端 ${wall}s · 模型内 ${gen}s · ${(blob.size / 1024).toFixed(0)} KB · ${text.length} 字`;
+  } catch (e) {
+    $('ttsMeta').textContent = '失败: ' + e.message;
+  } finally { $('ttsGo').disabled = false; }
+};
+
+$('sttGo').onclick = async () => {
+  const f = $('sttFile').files[0];
+  if (!f) { $('sttOut').textContent = '请先选择音频文件'; return; }
+  $('sttGo').disabled = true; $('sttOut').textContent = '转写中…'; $('sttMeta').textContent = '';
+  const t0 = performance.now();
+  try {
+    const fd = new FormData();
+    fd.append('file', f);
+    fd.append('model', 'whisper-small');
+    fd.append('language', $('sttLang').value);
+    fd.append('response_format', 'verbose_json');
+    const r = await fetch('/v1/audio/transcriptions', { method: 'POST', body: fd });
+    if (!r.ok) throw new Error(await r.text());
+    const j = await r.json();
+    $('sttOut').textContent = j.text || '(空)';
+    $('sttMeta').textContent = `端到端 ${((performance.now() - t0) / 1000).toFixed(2)}s · 模型内 ${j.gen_seconds}s · ${(j.segments || []).length} 段`;
+  } catch (e) {
+    $('sttOut').textContent = '失败: ' + e.message;
+  } finally { $('sttGo').disabled = false; }
+};
+
+loadHealth();
+</script>
+</body>
+</html>
